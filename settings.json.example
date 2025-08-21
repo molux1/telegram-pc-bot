@@ -1,4 +1,5 @@
 {
   "telegram_token": "СЮДА_ВСТАВИТЬ_ТОКЕН_ПОЛУЧЕННЫЙ_ОТ_BOTFATHER",
   "owner_id": ТВОЙ_ID_ВЗЯТЬ_МОЖЕШЬ_В_МОЕМ_БОТЕ_/ID
+  "github_repo_url": "https://github.com/molux1/telegram-pc-bot"
 }
