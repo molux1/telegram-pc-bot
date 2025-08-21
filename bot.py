@@ -8,6 +8,7 @@ import string
 import time
 import re
 from io import BytesIO
+import pyautogui ### <<< ДОБАВЛЕНО: Импорт для создания скриншотов
 
 # --- 1. НАСТРОЙКА ЛОГГИРОВАНИЯ ---
 logging.basicConfig(
@@ -25,12 +26,10 @@ try:
     with open('settings.json', 'r', encoding='utf-8') as f:
         settings = json.load(f)
         BOT_TOKEN = settings.get("telegram_token")
-        ### <<< ИЗМЕНЕНО: Загружаем ID владельца
         OWNER_ID = int(settings.get("owner_id", 0))
 
     if not BOT_TOKEN or BOT_TOKEN == "СЮДА_ВСТАВЬТЕ_ВАШ_ТЕЛЕГРАМ_ТОКЕН":
         raise ValueError("Токен не найден в settings.json.")
-    ### <<< ИЗМЕНЕНО: Проверяем, что ID владельца указан
     if OWNER_ID == 0:
         raise ValueError("owner_id не указан или равен 0 в settings.json.")
 
@@ -39,7 +38,7 @@ except (FileNotFoundError, ValueError, TypeError) as e:
     exit()
 
 bot = telebot.TeleBot(BOT_TOKEN)
-log.info("✅ Бот успешно инициализирован. Владелец ID: %d", OWNER_ID) ### <<< ИЗМЕНЕНО: Логируем ID владельца
+log.info("✅ Бот успешно инициализирован. Владелец ID: %d", OWNER_ID)
 
 # --- 3. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
@@ -59,7 +58,22 @@ def get_user_info_string(message_or_user) -> str:
 USER_DB_FILE = 'users.txt'
 upload_destination = {}
 
-### <<< ИЗМЕНЕНО: Функция проверки, является ли пользователь владельцем
+### <<< ИЗМЕНЕНО: Клавиатура теперь зависит от того, кто ее вызывает (владелец или нет)
+def get_main_keyboard(message: telebot.types.Message):
+    """Создает и возвращает клавиатуру в зависимости от прав пользователя."""
+    keyboard = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
+    
+    # Кнопка "Старт" есть у всех
+    start_button = telebot.types.KeyboardButton("🟢 Старт 🟢")
+    keyboard.add(start_button)
+    
+    # Если пользователь - владелец, добавляем ему дополнительные кнопки
+    if is_owner(message):
+        screenshot_button = telebot.types.KeyboardButton("📸 Скриншот")
+        keyboard.add(screenshot_button) # Добавляем кнопку на новую строку
+        
+    return keyboard
+
 def is_owner(message: telebot.types.Message) -> bool:
     """Возвращает True, если ID пользователя совпадает с OWNER_ID."""
     return message.from_user.id == OWNER_ID
@@ -106,32 +120,77 @@ def set_system_volume(level: int) -> bool:
 
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
-    user_info = get_user_info_string(message)
-    log.info(f"CMD /start: Получен запрос от {user_info}")
     add_user_to_db(message)
-    
-    ### <<< ИЗМЕНЕНО: Разделяем текст приветствия для владельца и обычных пользователей
+    user_info = get_user_info_string(message)
+    log.info("CMD /start: Получен запрос от %s.", user_info)
+
     if is_owner(message):
         help_text = (
-            "👑 *Привет, Владелец!* Вам доступны все команды:\n\n"
-            "🔊 `/volumeup` - Громкость на 100%\n"
-            "🔈 `/volumedown` - Громкость на 0%\n"
-            "📁 `/download /путь/к/файлу` - Скачать файл\n"
-            "📎 `/upload` - Загрузить файл\n"
-            "🔑 `/pass <длина>` - Сгенерировать пароль"
+            "| 👑 *Привет, Владелец!* Вам доступны все команды и кнопки:\n\n"
+            "| 🔊 */volumeup* `[процент]` - Изменить громкость\n"
+            "| 🔈 */volumedown* `[процент]` - Изменить громкость\n"
+            "| 📁 */download* `/путь/к/файлу` - Скачать файл\n"
+            "| 📎 */upload* - Загрузить файл\n"
+            "| 🔑 */pass* `<длина>` - Сгенерировать пароль"
         )
     else:
         help_text = (
-            "👋 *Привет! Я твой бот-помощник.*\n\n"
-            "Вам доступны следующие команды:\n\n"
-            "🔑 `/pass <длина>` - Сгенерировать пароль (например, `/pass 16`)\n"
-            "ℹ️ `/help` - Показать это сообщение"
+            "| 👋 *Привет! Я твой бот-помощник.*\n\n"
+            "| 🔐 Вам доступны следующие команды:\n\n"
+            "| 🔑 */pass* `<длина>` - Сгенерировать пароль (например, `/pass 8`)\n"
+            "| ℹ️ */help* - Показать это сообщение"
         )
-        
-    bot.reply_to(message, help_text, parse_mode='Markdown')
-    log.info(f"✅ Отправлено приветствие и список команд пользователю {user_info}.")
+    ### <<< ИЗМЕНЕНО: Передаем `message`, чтобы функция знала, какую клавиатуру показать
+    bot.reply_to(message, help_text, parse_mode='Markdown', reply_markup=get_main_keyboard(message))
+
+@bot.message_handler(func=lambda message: message.text == "🟢 Старт 🟢")
+def handle_start_button(message):
+    user_info = get_user_info_string(message)
+    log.info("Button 'Старт': Нажата кнопка старта от %s.", user_info)
+    send_welcome(message)
 
 # --- Команды только для владельца ---
+
+### <<< ДОБАВЛЕНО: Обработчик для кнопки и команды скриншота
+@bot.message_handler(commands=['screenshot'])
+def handle_screenshot_command(message):
+    # Эта функция нужна, чтобы можно было вызвать скриншот командой
+    handle_screenshot_request(message)
+
+@bot.message_handler(func=lambda message: message.text == "📸 Скриншот")
+def handle_screenshot_request(message):
+    user_info = get_user_info_string(message)
+    log.info(f"Button 'Скриншот': Получен запрос от {user_info}")
+
+    if not is_owner(message):
+        log.warning(f"ACCESS DENIED: {user_info} попытался сделать скриншот.")
+        bot.reply_to(message, "⛔ У вас нет доступа к этой функции.")
+        return
+        
+    try:
+        bot.send_chat_action(message.chat.id, 'upload_photo')
+        
+        # Получаем точное время для подписи
+        current_time = time.strftime('%H:%M:%S')
+        caption_text = f"✅ Скриншот ({current_time})"
+        
+        # Делаем скриншот
+        screenshot = pyautogui.screenshot()
+        
+        # Сохраняем скриншот в оперативную память, а не на диск
+        bio = BytesIO()
+        bio.name = 'screenshot.png'
+        screenshot.save(bio, 'PNG')
+        bio.seek(0) # Перемещаем "курсор" в начало файла в памяти
+        
+        # Отправляем фото из памяти
+        bot.send_photo(message.chat.id, photo=bio, caption=caption_text)
+        log.info(f"✅ Скриншот успешно сделан и отправлен {user_info}.")
+
+    except Exception as e:
+        log.error(f"💥 Ошибка при создании или отправке скриншота для {user_info}: {e}")
+        bot.reply_to(message, f"❌ Не удалось сделать скриншот: {e}")
+
 
 @bot.message_handler(commands=['volumeup', 'volumedown'])
 def handle_volume_control(message):
@@ -139,7 +198,6 @@ def handle_volume_control(message):
     command = message.text.split()[0]
     log.info(f"CMD {command}: Получен запрос от {user_info}")
     
-    # 1. Проверяем, что команду использует владелец
     if not is_owner(message):
         log.warning(f"ACCESS DENIED: {user_info} попытался использовать {command}.")
         bot.reply_to(message, "⛔ У вас нет доступа к этой команде.")
@@ -151,7 +209,6 @@ def handle_volume_control(message):
     target_level = None
 
     try:
-        # 2. Проверяем, указал ли пользователь свой процент
         if len(parts) > 1:
             level_arg = parts[1]
             if not level_arg.isdigit():
@@ -165,16 +222,13 @@ def handle_volume_control(message):
                 log.warning(f"⚠️ Некорректный процент громкости ({target_level}) от {user_info}.")
                 return
         else:
-            # 3. Если процент не указан, используем значения по умолчанию
             if command == '/volumeup':
                 target_level = 100
-            else: # command == '/volumedown'
+            else:
                 target_level = 0
             log.info(f"Процент не указан. Используется значение по умолчанию {target_level}% для {command}.")
 
-        # 4. Устанавливаем громкость и отправляем ответ
         if set_system_volume(target_level):
-            # Выбираем красивый эмодзи в зависимости от уровня громкости
             emoji = "🔊" if target_level > 50 else "🔉" if target_level > 0 else "🔈"
             bot.reply_to(message, f"{emoji} Громкость установлена на {target_level}%")
             log.info(f"✅ Громкость успешно установлена на {target_level}% для ПК.")
@@ -194,7 +248,6 @@ def download_file(message):
     user_info = get_user_info_string(message)
     log.info(f"CMD /download: Получен запрос от {user_info}")
     
-    ### <<< ИЗМЕНЕНО: Проверка прав доступа
     if not is_owner(message):
         log.warning(f"ACCESS DENIED: {user_info} попытался использовать /download.")
         bot.reply_to(message, "⛔ У вас нет доступа к этой команде.")
@@ -242,7 +295,6 @@ def upload_file_prompt(message):
     user_info = get_user_info_string(message)
     log.info(f"CMD /upload: Получен запрос от {user_info}")
     
-    ### <<< ИЗМЕНЕНО: Проверка прав доступа
     if not is_owner(message):
         log.warning(f"ACCESS DENIED: {user_info} попытался использовать /upload.")
         bot.reply_to(message, "⛔ У вас нет доступа к этой команде.")
@@ -266,7 +318,6 @@ def handle_document_upload(message):
         log.warning(f"⚠️ Получен документ от {user_info}, но команда /upload не была вызвана.")
         return
 
-    ### <<< ИЗМЕНЕНО: Проверяем, что документ прислал именно владелец
     if not is_owner(message):
         log.warning(f"ACCESS DENIED: {user_info} отправил документ, не будучи владельцем.")
         del upload_destination[user_id]
@@ -284,7 +335,6 @@ def handle_document_upload(message):
         
         save_path = os.path.join(dest_path, original_filename)
         
-        # Защита от перезаписи файла
         counter = 1
         base_name, ext = os.path.splitext(original_filename)
         while os.path.exists(save_path):
@@ -330,7 +380,7 @@ def generate_password(message):
         chars = string.ascii_letters + string.digits + string.punctuation
         password = ''.join(random.choice(chars) for _ in range(length))
         
-        bot.reply_to(message, f"🔑 Ваш новый пароль ({length} симв.):\n\n`{password}`", parse_mode='Markdown')
+        bot.reply_to(message, f"🔑 Ваш новый пароль ({length} симв.):\n\n`{password}`\n\n_(нажмите, чтобы скопировать)_", parse_mode='Markdown')
         log.info(f"✅ Пароль длиной {length} сгенерирован и отправлен пользователю {user_info}.")
 
     except (IndexError, ValueError):

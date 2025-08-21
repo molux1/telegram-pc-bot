@@ -1,5 +1,7 @@
-Вначале в консоли напиши это
+Добрый день, теперь в консоли пиши команду 
 
-pip install pyTelegramBotAPI
-pip install pycaw
-pip install pyalsaaudio
+pip install -r requirements.txt
+
+Потом как скачаешь всё, пишешь в консоли 
+
+py bot.py
