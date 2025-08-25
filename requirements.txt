@@ -76,7 +76,6 @@ pyasn1_modules==0.4.2
 PyAutoGUI==0.9.54
 pycaw==20240210
 pycparser==2.22
-pyCraft @ git+https://github.com/ammaraskar/pyCraft.git@bcd156e83bd35fb2fdc6cfa64f97bfc96d7cc1a1
 pydantic==2.11.7
 pydantic_core==2.33.2
 PyGetWindow==0.0.9
